@@ -1,0 +1,191 @@
+---
+title: "Modelo Logístico"
+author: "Mateus Girolimetto"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#-------------------------------------------------
+# 1. Carregando Dados
+#-------------------------------------------------
+```{r Carregando Dados}
+library(readr)
+diabetes_dataset <- read_csv("/home/usuario/Desktop/Monografia/Versão 2/diabetes_dataset.csv")
+
+# Pré-processamento: Conversão das variáveis em fatores
+diabetes_dataset$gender <- factor(diabetes_dataset$gender, levels = c("Male", "Female", "Other"))
+
+diabetes_dataset$ethnicity <- factor(diabetes_dataset$ethnicity, levels = c("White", "Hispanic", "Black", "Asian", "Other"))
+
+diabetes_dataset$education_level <- factor(diabetes_dataset$education_level, levels = c("No formal", "Highschool", "Graduate", "Postgraduate"))
+
+diabetes_dataset$income_level <- factor(diabetes_dataset$income_level, levels = c("Low", "Lower-Middle", "Middle", "Upper-Middle", "High"))
+
+diabetes_dataset$employment_status <- factor(diabetes_dataset$employment_status, levels = c("Employed", "Unemployed", "Retired", "Student"))
+
+diabetes_dataset$smoking_status <- factor(diabetes_dataset$smoking_status, levels = c("Never", "Former", "Current"))
+
+diabetes_dataset$family_history_diabetes <- factor(diabetes_dataset$family_history_diabetes, levels = c(0, 1), labels = c("No", "Yes"))
+
+diabetes_dataset$hypertension_history <- factor(diabetes_dataset$hypertension_history, levels = c(0, 1), labels = c("No", "Yes"))
+
+diabetes_dataset$cardiovascular_history <- factor(diabetes_dataset$cardiovascular_history, levels = c(0, 1), labels = c("No", "Yes"))
+
+diabetes_dataset$diabetes_stage <- factor(diabetes_dataset$diabetes_stage, levels = c("No Diabetes", "Pre-Diabetes", "Type 1", "Type 2", "Gestational"))
+
+diabetes_dataset$diagnosed_diabetes <- factor(diabetes_dataset$diagnosed_diabetes, levels = c(0, 1), labels = c("No", "Yes"))
+```
+
+#-------------------------------------------------
+# 2. Split treino / teste  e padronização
+#-------------------------------------------------
+```{r Divisão do Conjunto de Dados - parte 1}
+library(caret)
+set.seed(123)
+
+# Primeira Divisão: traning (95%) e test (5%)
+train_index <- createDataPartition(diabetes_dataset$diagnosed_diabetes, p = 0.95, list = FALSE)
+train <- diabetes_dataset[train_index, ]
+test  <- diabetes_dataset[-train_index, ]
+```
+
+```{r Padronização}
+
+# Separando variáveis numéricas
+library(dplyr)
+numeriche_train <- train %>% select(where(is.numeric))
+categoriali_train <- train %>% select(where(is.factor))
+
+numeriche_test <- test %>% select(where(is.numeric))
+categoriali_test <- test %>% select(where(is.factor))
+
+# Padronizando Treino
+numeriche_train_scaled <- scale(numeriche_train)
+
+# Guardar os parâmetros do treino (médias e desvios)
+numeriche_train_means <- attr(numeriche_train_scaled, "scaled:center")
+numeriche_train_sds   <- attr(numeriche_train_scaled, "scaled:scale")
+
+# Conjunto Treino Padronizado
+numeriche_train_scaled <- as.data.frame(numeriche_train_scaled)
+
+train_scaled <- cbind(numeriche_train_scaled, categoriali_train)
+
+# Aplicando em teste
+
+numeriche_test_scaled <- scale(numeriche_test,
+                        center = numeriche_train_means,
+                        scale  = numeriche_train_sds)
+numeriche_test_scaled <- as.data.frame(numeriche_test_scaled)
+
+test_scaled <- cbind(numeriche_test_scaled, categoriali_test)
+
+```
+
+```{r divisione dell insieme dei dati - parte 2}
+library(caret)
+set.seed(123)
+
+# Segunda divisão no "train": train (89% de 95% = 85%) e valid (10%)
+train_index_2 <- createDataPartition(train_scaled$diagnosed_diabetes, p = 85/95, list = FALSE)
+train_scaled_2 <- train_scaled[train_index_2, ]
+valid_scaled <- train_scaled[-train_index_2, ]
+```
+
+
+#-------------------------------------------------
+# 3. Modelo GLM: Logístico
+#-------------------------------------------------
+```{r Modelo GLM}
+vars_to_drop <- c("diabetes_stage","diabetes_risk_score")
+
+model <- glm(
+  diagnosed_diabetes ~ .,
+  data = train_scaled_2 |> dplyr::select(-all_of(vars_to_drop)),
+  family = binomial
+  )
+```
+
+```{r Resultados do Modelo}
+summary(model)
+
+coef(model)
+
+exp(coef(glm))
+
+confint(glm)
+
+cor(diabetes_dataset[, c("glucose_fasting", "glucose_postprandial", "hba1c")])
+```
+
+
+#-------------------------------------------------
+# 4. Limiar
+#-------------------------------------------------
+```{r Encontrando Limiar}
+# PREVISÕES NA VALIDAÇÃO
+prob_glm <- predict(
+  model,
+  newdata = valid_scaled |> dplyr::select(-all_of(vars_to_drop)),
+  type = "response"
+)
+
+# CURVA ROC
+roc_glm <- pROC::roc(
+  response  = valid_scaled$diagnosed_diabetes,
+  predictor = prob_glm,
+  levels    = c("No", "Yes"),
+  direction = "<",
+  quiet     = TRUE
+)
+
+# TODOS OS LIMIARES
+
+todos_limiares <- pROC::coords(
+  roc_glm,
+  x = "all",
+  ret = c("threshold", "sensitivity", "specificity")
+)
+todos_limiares
+
+# 4. ESCOLHER LIMIAR (sensibilidade ~ 0.90)
+candidatos <- todos_limiares[
+  todos_limiares$sensitivity >= 0.90,
+]
+melhor_ponto <- candidatos[which.max(candidatos$threshold), ]
+
+print(melhor_ponto)
+
+threshold_glm <- melhor_ponto$threshold
+threshold_glm
+```
+
+#-------------------------------------------------
+# 5. Avaliação no teste
+#-------------------------------------------------
+
+```{r Avaliação Final}
+
+glm_final <- glm( diagnosed_diabetes ~ ., data = train_scaled |> dplyr::select(-all_of(vars_to_drop)), family = binomial )
+
+prob_test_glm <- predict(glm_final, newdata = test_scaled |> dplyr::select(-all_of(vars_to_drop)), type = "response")
+
+
+pred_test_glm <- factor(ifelse(prob_test_glm >= threshold_glm,"Yes","No"), levels =  c("No", "Yes"))
+
+library(caret)
+confusionMatrix(
+  data = pred_test_glm,
+  reference = test_scaled$diagnosed_diabetes,
+  positive = "Yes"
+)
+
+roc_test_glm <- pROC::roc(test_scaled$diagnosed_diabetes, prob_test_glm)
+
+library(pROC)
+auc(roc_test_glm)
+plot(roc_test_glm)
+
+```
+
+
